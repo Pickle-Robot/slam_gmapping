@@ -45,6 +45,9 @@
 
 #include <boost/thread.hpp>
 
+// EDIT : START & STOP
+#include <std_srvs/SetBool.h>
+
 class SlamGMapping
 {
   public:
@@ -152,7 +155,8 @@ class SlamGMapping
     double llsamplestep_;
     double lasamplerange_;
     double lasamplestep_;
-
+    int increment_;
+    
     ros::NodeHandle private_nh_;
 
     unsigned long int seed_;
@@ -160,4 +164,44 @@ class SlamGMapping
     double transform_publish_period_;
     double tf_delay_;
     bool publish_tf_;
+
+    // EDIT : NODE NAME : Used to identify this node inside the TGO framework
+    std::string node_name_;
+    // EDIT : START & STOP : LOCK : Allows start-n-stop of gmapping with a safe lock
+    boost::mutex start_n_stop_mutex_;
+    ros::ServiceServer start_n_stop_service_;
+    bool start_n_stop=false;
+    bool inline startstopCallback(std_srvs::SetBool::Request  &req,
+                                  std_srvs::SetBool::Response &res){
+      boost::lock_guard<boost::mutex> start_n_stop_lock(start_n_stop_mutex_);
+      // If nothing changed just return from the callback
+      if ( start_n_stop == req.data ) {
+        res.success = true;
+        return true;
+      }
+      // If a start request arrived and slam was stopped
+      if ( req.data ) {
+        // Reset variables
+        laser_count_ = 0;
+        got_first_scan_ = false;
+        // Delete pointers
+        delete gsp_;
+        gsp_ = NULL;
+        if(gsp_laser_) {
+          delete gsp_laser_;
+          gsp_laser_ = NULL;
+        }
+        if(gsp_odom_) {
+          delete gsp_odom_;
+          gsp_odom_ = NULL;
+        }
+        // Init processor
+        gsp_ = new GMapping::GridSlamProcessor();
+        ROS_ASSERT(gsp_);
+      }
+      // Align slam and request
+      start_n_stop = req.data;
+      res.success = true;
+      return true;
+    };
 };
