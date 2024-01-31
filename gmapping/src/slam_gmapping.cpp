@@ -280,11 +280,12 @@ void SlamGMapping::startLiveSlam()
   entropy_publisher_ = private_nh_.advertise<std_msgs::Float64>("entropy", 1, true);
   sst_ = node_.advertise<nav_msgs::OccupancyGrid>("map", 1, true);
   sstm_ = node_.advertise<nav_msgs::MapMetaData>("map_metadata", 1, true);
-  pose_pub_ = node_.advertise<geometry_msgs::PoseStamped>("gmapping_pose", 1, true);
+  pose_pub_ = node_.advertise<geometry_msgs::PoseWithCovarianceStamped>("gmapping_pose", 1, true);
   ss_ = node_.advertiseService("dynamic_map", &SlamGMapping::mapCallback, this);
   scan_filter_sub_ = new message_filters::Subscriber<sensor_msgs::LaserScan>(node_, "scan", 5);
   scan_filter_ = new tf::MessageFilter<sensor_msgs::LaserScan>(*scan_filter_sub_, tf_, odom_frame_, 5);
   scan_filter_->registerCallback(boost::bind(&SlamGMapping::laserCallback, this, _1));
+  particles_pub_ = node_.advertise<geometry_msgs::PoseArray>("particles", 1, true);
 
   transform_thread_ = new boost::thread(boost::bind(&SlamGMapping::publishLoop, this, transform_publish_period_));
 }
@@ -686,6 +687,30 @@ SlamGMapping::computePoseEntropy()
 }
 
 void
+SlamGMapping::publishParticles()
+{
+  if (particles_pub_.getNumSubscribers() == 0) {
+    return;
+  }
+  geometry_msgs::PoseArray particles;
+  for(std::vector<GMapping::GridSlamProcessor::Particle>::const_iterator it = gsp_->getParticles().begin();
+      it != gsp_->getParticles().end();
+      ++it)
+  {
+    geometry_msgs::Pose ros_pose;
+    ros_pose.position.x = it->pose.x;
+    ros_pose.position.y = it->pose.y;
+    tf::Quaternion quat = tf::createQuaternionFromRPY(0, 0, it->pose.theta);
+    ros_pose.orientation.x = quat[0];
+    ros_pose.orientation.y = quat[1];
+    ros_pose.orientation.z = quat[2];
+    ros_pose.orientation.w = quat[3];
+    particles.poses.push_back(ros_pose);
+  }
+  particles_pub_.publish(particles);
+}
+
+void
 SlamGMapping::updateMap(const sensor_msgs::LaserScan& scan)
 {
   ROS_DEBUG("Update map");
@@ -705,6 +730,8 @@ SlamGMapping::updateMap(const sensor_msgs::LaserScan& scan)
   entropy.data = computePoseEntropy();
   if(entropy.data > 0.0)
     entropy_publisher_.publish(entropy);
+  
+  publishParticles();
 
   if(!got_map_) {
     map_.map.info.resolution = delta_;
@@ -816,20 +843,20 @@ void SlamGMapping::publishTransform()
     ros::Time tf_expiration = now + ros::Duration(tf_delay_);
     tfB_->sendTransform( tf::StampedTransform (map_to_odom_, tf_expiration, map_frame_, odom_frame_));
   }
-  geometry_msgs::PoseStamped pose_stamped;
-  pose_stamped.header.stamp = now;
-  pose_stamped.header.frame_id = map_frame_;
+  geometry_msgs::PoseWithCovarianceStamped gmapping_pose;
+  gmapping_pose.header.stamp = now;
+  gmapping_pose.header.frame_id = map_frame_;
 
-  pose_stamped.pose.position.x = map_to_base_.getOrigin().x();
-  pose_stamped.pose.position.y = map_to_base_.getOrigin().y();
-  pose_stamped.pose.position.z = map_to_base_.getOrigin().z();
+  gmapping_pose.pose.pose.position.x = map_to_base_.getOrigin().x();
+  gmapping_pose.pose.pose.position.y = map_to_base_.getOrigin().y();
+  gmapping_pose.pose.pose.position.z = map_to_base_.getOrigin().z();
 
   tf::Quaternion q = map_to_base_.getRotation();
-  pose_stamped.pose.orientation.x = q.x();
-  pose_stamped.pose.orientation.y = q.y();
-  pose_stamped.pose.orientation.z = q.z();
-  pose_stamped.pose.orientation.w = q.w();
+  gmapping_pose.pose.pose.orientation.x = q.x();
+  gmapping_pose.pose.pose.orientation.y = q.y();
+  gmapping_pose.pose.pose.orientation.z = q.z();
+  gmapping_pose.pose.pose.orientation.w = q.w();
 
-  pose_pub_.publish(pose_stamped);
+  pose_pub_.publish(gmapping_pose);
   map_to_odom_mutex_.unlock();
 }
