@@ -816,15 +816,20 @@ void SlamGMapping::publishTransform()
     ros::Time tf_expiration = now + ros::Duration(tf_delay_);
     tfB_->sendTransform( tf::StampedTransform (map_to_odom_, tf_expiration, map_frame_, odom_frame_));
   }
-  tf::Stamped<tf::Transform> map_to_base_stamped;
-  map_to_base_stamped.setData()
-  // geometry_msgs::PoseStamped map_to_base;
-  // map_to_base_pose.header.frame_id = map_frame_;
-  // map_to_base_pose.header.stamp = now;
-  geometry_msgs::Pose map_to_base_pose;
-  tf2::toMsg(map_to_base_, map_to_base_pose);
-  // map_to_base_pose.pose.position = map_to_base_.getOrigin();
-  // map_to_base_pose.pose.orientation = map_to_base_.getRotation();
-  pose_pub_.publish(map_to_base_pose);
+  geometry_msgs::PoseStamped pose_stamped;
+  pose_stamped.header.stamp = now;
+  pose_stamped.header.frame_id = map_frame_;
+
+  pose_stamped.pose.position.x = map_to_base_.getOrigin().x();
+  pose_stamped.pose.position.y = map_to_base_.getOrigin().y();
+  pose_stamped.pose.position.z = map_to_base_.getOrigin().z();
+
+  tf::Quaternion q = map_to_base_.getRotation();
+  pose_stamped.pose.orientation.x = q.x();
+  pose_stamped.pose.orientation.y = q.y();
+  pose_stamped.pose.orientation.z = q.z();
+  pose_stamped.pose.orientation.w = q.w();
+
+  pose_pub_.publish(pose_stamped);
   map_to_odom_mutex_.unlock();
 }
