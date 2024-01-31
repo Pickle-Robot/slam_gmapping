@@ -165,8 +165,6 @@ class SlamGMapping
     double tf_delay_;
     bool publish_tf_;
 
-    // EDIT : NODE NAME : Used to identify this node inside the TGO framework
-    std::string node_name_;
     // EDIT : START & STOP : LOCK : Allows start-n-stop of gmapping with a safe lock
     boost::mutex start_n_stop_mutex_;
     ros::ServiceServer start_n_stop_service_;

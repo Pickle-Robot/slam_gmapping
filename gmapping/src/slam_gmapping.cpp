@@ -284,9 +284,8 @@ void SlamGMapping::init()
   // EDIT : SAMPLE SKIP : increment param allows to analyze only a subset of samples
   if(!private_nh_.getParam("increment", increment_))
     increment_ = 1;
-  // EDIT : NODE NAME : used to identify this node
-  if(!private_nh_.getParam("node", node_name_))
-    node_name_ = "slam";
+  if(!private_nh_.getParam("active_on_start", start_n_stop))
+    start_n_stop = true;
 }
 
 
@@ -308,7 +307,7 @@ void SlamGMapping::startLiveSlam()
 
   transform_thread_ = new boost::thread(boost::bind(&SlamGMapping::publishLoop, this, transform_publish_period_));
   // EDIT : START & STOP
-  start_n_stop_service_ = node_.advertiseService(node_name_+"/start_n_stop", &SlamGMapping::startstopCallback, this);
+  start_n_stop_service_ = private_nh_.advertiseService("set_active", &SlamGMapping::startstopCallback, this);
 }
 
 
