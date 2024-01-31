@@ -693,6 +693,8 @@ SlamGMapping::publishParticles()
     return;
   }
   geometry_msgs::PoseArray particles;
+  particles.header.frame_id = map_frame_;
+  particles.header.stamp = ros::Time::now();
   for(std::vector<GMapping::GridSlamProcessor::Particle>::const_iterator it = gsp_->getParticles().begin();
       it != gsp_->getParticles().end();
       ++it)
