@@ -69,6 +69,7 @@ class SlamGMapping
     ros::Publisher sst_;
     ros::Publisher sstm_;
     ros::Publisher pose_pub_;
+    ros::Publisher correction_pose_pub_;
     ros::Publisher particles_pub_;
     ros::ServiceServer ss_;
     tf::TransformListener tf_;
@@ -98,6 +99,7 @@ class SlamGMapping
     tf::Transform map_to_odom_;
     tf::Transform map_to_base_;
     tf::Transform base_to_laser_;
+    GMapping::OrientedPoint mean_pose_;
     boost::mutex map_to_odom_mutex_;
     boost::mutex map_mutex_;
 
@@ -116,7 +118,7 @@ class SlamGMapping
     bool initMapper(const sensor_msgs::LaserScan& scan);
     bool addScan(const sensor_msgs::LaserScan& scan, GMapping::OrientedPoint& gmap_pose);
     double computePoseEntropy();
-    void publishParticles();
+    void publishPoseAndParticles(ros::Time now);
 
     // Parameters used by GMapping
     double maxRange_;

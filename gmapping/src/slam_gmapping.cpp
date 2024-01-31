@@ -281,11 +281,12 @@ void SlamGMapping::startLiveSlam()
   sst_ = node_.advertise<nav_msgs::OccupancyGrid>("map", 1, true);
   sstm_ = node_.advertise<nav_msgs::MapMetaData>("map_metadata", 1, true);
   pose_pub_ = node_.advertise<geometry_msgs::PoseWithCovarianceStamped>("gmapping_pose", 1, true);
+  correction_pose_pub_ = node_.advertise<geometry_msgs::PoseWithCovarianceStamped>("gmapping_correction_pose", 1, true);
   ss_ = node_.advertiseService("dynamic_map", &SlamGMapping::mapCallback, this);
   scan_filter_sub_ = new message_filters::Subscriber<sensor_msgs::LaserScan>(node_, "scan", 5);
   scan_filter_ = new tf::MessageFilter<sensor_msgs::LaserScan>(*scan_filter_sub_, tf_, odom_frame_, 5);
   scan_filter_->registerCallback(boost::bind(&SlamGMapping::laserCallback, this, _1));
-  particles_pub_ = node_.advertise<geometry_msgs::PoseArray>("particles", 1, true);
+  particles_pub_ = node_.advertise<geometry_msgs::PoseArray>("particlecloud", 1, true);
 
   transform_thread_ = new boost::thread(boost::bind(&SlamGMapping::publishLoop, this, transform_publish_period_));
 }
@@ -532,6 +533,7 @@ SlamGMapping::initMapper(const sensor_msgs::LaserScan& scan)
     ROS_WARN("Unable to determine inital pose of laser! Starting point will be set to zero.");
     initialPose = GMapping::OrientedPoint(0.0, 0.0, 0.0);
   }
+  mean_pose_ = GMapping::OrientedPoint(0.0, 0.0, 0.0);
 
   gsp_->setMatchingParameters(maxUrange_, maxRange_, sigma_,
                               kernelSize_, lstep_, astep_, iterations_,
@@ -642,18 +644,20 @@ SlamGMapping::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
   {
     ROS_DEBUG("scan processed");
 
-    GMapping::OrientedPoint mpose = gsp_->getParticles()[gsp_->getBestParticleIndex()].pose;
-    ROS_DEBUG("new best pose: %.3f %.3f %.3f", mpose.x, mpose.y, mpose.theta);
+    mean_pose_ = gsp_->getParticles()[gsp_->getBestParticleIndex()].pose;
+    ROS_DEBUG("new best pose: %.3f %.3f %.3f", mean_pose_.x, mean_pose_.y, mean_pose_.theta);
     ROS_DEBUG("odom pose: %.3f %.3f %.3f", odom_pose.x, odom_pose.y, odom_pose.theta);
-    ROS_DEBUG("correction: %.3f %.3f %.3f", mpose.x - odom_pose.x, mpose.y - odom_pose.y, mpose.theta - odom_pose.theta);
+    ROS_DEBUG("correction: %.3f %.3f %.3f", mean_pose_.x - odom_pose.x, mean_pose_.y - odom_pose.y, mean_pose_.theta - odom_pose.theta);
 
-    tf::Transform laser_to_map = tf::Transform(tf::createQuaternionFromRPY(0, 0, mpose.theta), tf::Vector3(mpose.x, mpose.y, 0.0)).inverse();
+    tf::Transform laser_to_map = tf::Transform(tf::createQuaternionFromRPY(0, 0, mean_pose_.theta), tf::Vector3(mean_pose_.x, mean_pose_.y, 0.0)).inverse();
     tf::Transform odom_to_laser = tf::Transform(tf::createQuaternionFromRPY(0, 0, odom_pose.theta), tf::Vector3(odom_pose.x, odom_pose.y, 0.0));
 
     map_to_odom_mutex_.lock();
     map_to_odom_ = (odom_to_laser * laser_to_map).inverse();
     map_to_base_ = (base_to_laser_ * laser_to_map).inverse();
     map_to_odom_mutex_.unlock();
+
+    publishPoseAndParticles(scan->header.stamp);
 
     if(!got_map_ || (scan->header.stamp - last_map_update) > map_update_interval_)
     {
@@ -687,18 +691,68 @@ SlamGMapping::computePoseEntropy()
 }
 
 void
-SlamGMapping::publishParticles()
+SlamGMapping::publishPoseAndParticles(ros::Time now)
 {
-  if (particles_pub_.getNumSubscribers() == 0) {
-    return;
-  }
   geometry_msgs::PoseArray particles;
   particles.header.frame_id = map_frame_;
-  particles.header.stamp = ros::Time::now();
+  particles.header.stamp = now;
+  geometry_msgs::PoseWithCovarianceStamped gmapping_pose;
+  gmapping_pose.header.stamp = now;
+  gmapping_pose.header.frame_id = map_frame_;
+
+  gmapping_pose.pose.pose.position.x = map_to_base_.getOrigin().x();
+  gmapping_pose.pose.pose.position.y = map_to_base_.getOrigin().y();
+  gmapping_pose.pose.pose.position.z = map_to_base_.getOrigin().z();
+
+  tf::Quaternion q = map_to_base_.getRotation();
+  gmapping_pose.pose.pose.orientation.x = q.x();
+  gmapping_pose.pose.pose.orientation.y = q.y();
+  gmapping_pose.pose.pose.orientation.z = q.z();
+  gmapping_pose.pose.pose.orientation.w = q.w();
+
+  geometry_msgs::PoseWithCovarianceStamped correction_pose;
+  correction_pose.header.stamp = now;
+  correction_pose.header.frame_id = map_frame_;
+
+  correction_pose.pose.pose.position.x = map_to_odom_.getOrigin().x();
+  correction_pose.pose.pose.position.y = map_to_odom_.getOrigin().y();
+  correction_pose.pose.pose.position.z = map_to_odom_.getOrigin().z();
+
+  q = map_to_odom_.getRotation();
+  correction_pose.pose.pose.orientation.x = q.x();
+  correction_pose.pose.pose.orientation.y = q.y();
+  correction_pose.pose.pose.orientation.z = q.z();
+  correction_pose.pose.pose.orientation.w = q.w();
+
+  double weight_total = 0.0, min_weight = -std::numeric_limits<double>::max();
   for(std::vector<GMapping::GridSlamProcessor::Particle>::const_iterator it = gsp_->getParticles().begin();
       it != gsp_->getParticles().end();
       ++it)
   {
+    weight_total += it->weight;
+    if (it->weight > min_weight) {
+      min_weight = it->weight;
+    }
+  }
+
+  GMapping::OrientedPoint weight_pose_total(0.0, 0.0, 0.0);
+
+  unsigned int num_nonzero_weights = 0;
+  for(std::vector<GMapping::GridSlamProcessor::Particle>::const_iterator it = gsp_->getParticles().begin();
+      it != gsp_->getParticles().end();
+      ++it)
+  {
+    double normalized_weight = it->weight / min_weight;
+    if (normalized_weight > 0.0) {
+      num_nonzero_weights++;
+    }
+    double dx = it->pose.x - mean_pose_.x;
+    double dy = it->pose.y - mean_pose_.y;
+    double dtheta = it->pose.theta - mean_pose_.theta;
+    weight_pose_total.x += normalized_weight * dx * dx;
+    weight_pose_total.y += normalized_weight * dy * dy;
+    weight_pose_total.theta += normalized_weight * dtheta * dtheta;
+
     geometry_msgs::Pose ros_pose;
     ros_pose.position.x = it->pose.x;
     ros_pose.position.y = it->pose.y;
@@ -709,6 +763,29 @@ SlamGMapping::publishParticles()
     ros_pose.orientation.w = quat[3];
     particles.poses.push_back(ros_pose);
   }
+  if (num_nonzero_weights <= 1) {
+    ROS_WARN("All particles have zero weight. Not publishing pose.");
+  }
+  else
+  {
+    double weight_factor = num_nonzero_weights / ((num_nonzero_weights - 1) * weight_total);
+    GMapping::OrientedPoint covariance(
+      weight_pose_total.x * weight_factor,
+      weight_pose_total.y * weight_factor,
+      weight_pose_total.theta * weight_factor
+    );
+    gmapping_pose.pose.covariance[6*0+0] = covariance.x;
+    gmapping_pose.pose.covariance[6*1+1] = covariance.y;
+    gmapping_pose.pose.covariance[6*5+5] = covariance.theta;
+
+    correction_pose.pose.covariance[6*0+0] = covariance.x;
+    correction_pose.pose.covariance[6*1+1] = covariance.y;
+    correction_pose.pose.covariance[6*5+5] = covariance.theta;
+
+    pose_pub_.publish(gmapping_pose);
+    correction_pose_pub_.publish(correction_pose);
+  }
+
   particles_pub_.publish(particles);
 }
 
@@ -728,12 +805,12 @@ SlamGMapping::updateMap(const sensor_msgs::LaserScan& scan)
 
   GMapping::GridSlamProcessor::Particle best =
           gsp_->getParticles()[gsp_->getBestParticleIndex()];
-  std_msgs::Float64 entropy;
-  entropy.data = computePoseEntropy();
-  if(entropy.data > 0.0)
-    entropy_publisher_.publish(entropy);
+
+  // std_msgs::Float64 entropy;
+  // entropy.data = computePoseEntropy();
+  // if(entropy.data > 0.0)
+  //   entropy_publisher_.publish(entropy);
   
-  publishParticles();
 
   if(!got_map_) {
     map_.map.info.resolution = delta_;
@@ -845,20 +922,5 @@ void SlamGMapping::publishTransform()
     ros::Time tf_expiration = now + ros::Duration(tf_delay_);
     tfB_->sendTransform( tf::StampedTransform (map_to_odom_, tf_expiration, map_frame_, odom_frame_));
   }
-  geometry_msgs::PoseWithCovarianceStamped gmapping_pose;
-  gmapping_pose.header.stamp = now;
-  gmapping_pose.header.frame_id = map_frame_;
-
-  gmapping_pose.pose.pose.position.x = map_to_base_.getOrigin().x();
-  gmapping_pose.pose.pose.position.y = map_to_base_.getOrigin().y();
-  gmapping_pose.pose.pose.position.z = map_to_base_.getOrigin().z();
-
-  tf::Quaternion q = map_to_base_.getRotation();
-  gmapping_pose.pose.pose.orientation.x = q.x();
-  gmapping_pose.pose.pose.orientation.y = q.y();
-  gmapping_pose.pose.pose.orientation.z = q.z();
-  gmapping_pose.pose.pose.orientation.w = q.w();
-
-  pose_pub_.publish(gmapping_pose);
   map_to_odom_mutex_.unlock();
 }
