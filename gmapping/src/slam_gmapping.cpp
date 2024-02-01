@@ -1005,11 +1005,6 @@ SlamGMapping::mapCallback(nav_msgs::GetMap::Request  &req,
  *-------------------------------------------------------------------------------------------------------------------------*/
 void SlamGMapping::publishTransform()
 {
-  // EDIT : START & STOP : LOCK
-  {
-    boost::lock_guard<boost::mutex> start_n_stop_lock(start_n_stop_mutex_);
-    if ( ! start_n_stop ) return;
-  }
   map_to_odom_mutex_.lock();
   ros::Time now = ros::Time::now();
   if (publish_tf_) {
